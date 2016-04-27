@@ -1,0 +1,285 @@
+#!/bin/bash
+#
+# This is a resource agent for managing a ramdisk. Optionally, one
+# can choose to use DRBD9 to replicate that ramdisk.
+# 
+#       Original Author:    Matt Kereczman
+
+#######################################################################
+# Initialization:
+
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/lib/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/ocf-shellfuncs
+
+# Defaults
+OCF_RESKEY_type_default="tmpfs"
+: ${OCF_RESKEY_type=${OCF_RESKEY_type_default}}
+
+#######################################################################
+
+meta_data() {
+	cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="ramdisk" version="0.1">
+<version>0.1</version>
+
+<longdesc lang="en">
+This is a resource agent for creating a ramdisk. Optionally, it can
+also be setup as a block/loop device. 
+
+</longdesc>
+<shortdesc lang="en">RA for initializing ramdisks</shortdesc>
+
+<parameters>
+<parameter name="type" unique="0">
+<longdesc lang="en">
+Use 'ramfs' or 'tmpfs'. Default is tmpfs.
+</longdesc>
+<shortdesc lang="en">ramfs or tmpfs</shortdesc>
+<content type="string" default="tmpfs" />
+</parameter>
+
+<parameter name="mountpoint" required="1" unique="1">
+<longdesc lang="en">
+Where we will mount the ramdisk.
+</longdesc>
+<shortdesc lang="en">mountpoint for ramdisk</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="size" required="1" unique="0">
+<longdesc lang="en">
+Size of the ramdisk. Must include the unit (k,m,g,t), 
+all units are in Bytes. 
+
+Example: "size='512m'"
+</longdesc>
+<shortdesc lang="en">size of ramdisk</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+<parameter name="loop_device" unique="0">
+<longdesc lang="en">
+If you wish to set the ramdisk up as a block device, 
+you must supply a loop device name. 
+
+For example, "loop_device='loop0'"
+
+If not defined, ramdisk will not be setup as loop device.
+</longdesc>
+<shortdesc lang="en">loop device</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+
+<parameter name="drbd_resource" unique="1">
+<longdesc lang="en">
+If you wish to use this as a DRBD replicated disk, specify
+the DRBD resource's name here. This requires that you have
+already placed the configuration file in '/etc/drbd.d/',
+or wherever your drbd.conf points.
+
+For example, "drbd_resource='r100'"
+
+Using DRBD on top requires you've set the optional 
+'loop_device' parameter.
+
+If not defined, ramdisk will not be used as the backing
+for a DRBD resource. 
+</longdesc>
+<shortdesc lang="en">loop device</shortdesc>
+<content type="string" default="" />
+</parameter>
+
+</parameters>
+
+<actions>
+<action name="start"        timeout="20" />
+<action name="stop"         timeout="20" />
+<action name="monitor"      timeout="20" interval="10" depth="0" />
+</actions>
+</resource-agent>
+END
+}
+
+#######################################################################
+
+# shamefully copied from Filesystem RA
+list_mounts() {
+    logger "MDK: list_mounts"
+    local inpf=""
+    if [ -e "/proc/mounts" ] ; then
+        inpf=/proc/mounts
+    elif [ -f "/etc/mtab" -a -r "/etc/mtab" ]; then
+        inpf=/etc/mtab
+    fi
+    if [ "$inpf" ]; then
+        cut -d' ' -f1,2,3 < $inpf
+    else
+        $MOUNT | cut -d' ' -f1,3,5
+    fi
+}
+
+
+
+ramdisk_usage() {
+	cat <<END
+usage: $0 {start|stop|monitor}
+
+Expects to have a fully populated OCF RA-compliant environment set.
+END
+}
+
+ramdisk_start() {
+    logger "MDK: ramdisk_start"
+    ramdisk_monitor
+    if [ $? =  $OCF_SUCCESS ]; then
+	    return $OCF_SUCCESS
+    fi
+    
+    logger "MDK: loop_device is set to ${OCF_RESKEY_loop_device}"
+    # TODO: Check that we have enough free memory to do this
+    $MOUNT -t ${OCF_RESKEY_type} -o size=${OCF_RESKEY_size} tmpfs ${OCF_RESKEY_mountpoint}
+    if [ $? =  $OCF_SUCCESS ]; then
+        if [ -n "${OCF_RESKEY_loop_device}" ]; then
+            loop_device_start
+        else
+            return $OCF_SUCCESS
+        fi
+    fi  
+}
+
+loop_device_start() {
+    logger "MDK: loop_device_start"
+    # TODO: truncate or fallocate are valid; need to check for binaries.
+    fallocate -l ${OCF_RESKEY_size} ${OCF_RESKEY_mountpoint}/${OCF_RESKEY_loop_device}
+    if [ $? =  $OCF_SUCCESS ]; then
+        losetup /dev/${OCF_RESKEY_loop_device} ${OCF_RESKEY_mountpoint}/${OCF_RESKEY_loop_device}
+        if [ $? =  $OCF_SUCCESS ]; then
+            if [ -n "${OCF_RESKEY_drbd_resource}" ]; then
+                drbd_resource_start
+            else
+                return $OCF_SUCCESS
+            fi
+        else
+            return $OCF_ERR_GENERIC
+        fi
+    else
+        return $OCF_ERR_GENERIC
+    fi
+}
+
+drbd_resource_start(){
+    logger "MDK: drbd_resource_start"
+    # TODO: we should check for the binaries.
+    # since this is ramdisk, we'll always need fresh meta-data. 
+    drbdadm -- --force create-md ${OCF_RESKEY_drbd_resource}
+    drbdadm up ${OCF_RESKEY_drbd_resource}
+    
+    # wait for connection, but not forever, 10s should be long enough.
+    timeout 10 /bin/bash -c "drbdadm wait-connect ${OCF_RESKEY_drbd_resource}"
+    
+    # TODO: make everything below better
+    # see if we're inconsistent/inconsistent and set UpToDate/UpToDate if we are
+    DSTATE=$(drbdadm dstate ${OCF_RESKEY_drbd_resource})
+    if [ $DSTATE = "Inconsistent/Inconsistent/Inconsistent" ]; then
+        drbdadm -- --clear-bitmap new-current-uuid ${OCF_RESKEY_drbd_resource}/0
+        return $OCF_SUCCESS
+    elif [ $DSTATE = "Inconsistent" ]; then
+        drbdadm --force primary ${OCF_RESKEY_drbd_resource}
+        return $OCF_SUCCESS
+    elif [ $DSTATE = "UpToDate/Inconsistent" -o $DSTATE = "Inconsistent/UpToDate" ]; then
+        return $OCF_SUCCESS
+    elif [ $DSTATE = "UpToDate/UpToDate/UpToDate" ]; then
+        return $OCF_SUCCESS
+    else
+        return $OCF_ERR_GENERIC
+    fi
+
+}
+
+
+ramdisk_stop() {
+    logger "MDK: ramdisk_stop"
+    if [ -n "${OCF_RESKEY_loop_device}" ]; then
+        loop_device_stop
+    fi
+    ramdisk_monitor
+    if [ $? =  $OCF_SUCCESS ]; then
+        $UMOUNT ${OCF_RESKEY_mountpoint}
+        if [ $? =  $OCF_SUCCESS ]; then
+            return $OCF_SUCCESS
+        else
+            return $?    
+        fi
+    fi
+    return $OCF_SUCCESS
+}
+
+loop_device_stop() {
+    logger "MDK: loop_device_stop"
+    # is DRBD on top? Stop it first
+    if [ -n "${OCF_RESKEY_drbd_resource}" ]; then
+        drbd_resource_stop
+    fi
+
+    losetup /dev/${OCF_RESKEY_loop_device} >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        losetup -d /dev/${OCF_RESKEY_loop_device}
+        if [ $? =  $OCF_SUCCESS ]; then
+            return $OCF_SUCCESS
+        else
+            return $?
+        fi
+    fi
+}
+
+drbd_resource_stop(){
+    logger "MDK: drbd_resource_stop"
+    drbdadm down ${OCF_RESKEY_drbd_resource}
+    if [ $? =  $OCF_SUCCESS ]; then
+        return $OCF_SUCCESS
+    else
+        return $?
+    fi
+
+}
+
+# shamefully copied from Filesystem RA
+ramdisk_monitor() {
+	# Monitor _MUST!_ differentiate correctly between running
+	# (SUCCESS), failed (ERROR) or _cleanly_ stopped (NOT RUNNING).
+	# That is THREE states, not just yes/no.
+    logger "MDK: ramdisk_monitor"
+
+    if list_mounts | grep -q " ${OCF_RESKEY_mountpoint} " >/dev/null 2>&1; then
+        rc=$OCF_SUCCESS
+        msg="${OCF_RESKEY_mountpoint} is mounted (running)"
+    else
+        rc=$OCF_NOT_RUNNING
+        msg="${OCF_RESKEY_mountpoint} is unmounted (stopped)"
+    fi
+
+    return $rc
+
+}
+
+case $__OCF_ACTION in
+start)		ramdisk_start;;
+stop)		ramdisk_stop;;
+monitor)	ramdisk_monitor;;
+usage|help)	ramdisk_usage
+		exit $OCF_SUCCESS
+		;;
+meta-data) meta_data
+        exit $OCF_SUCCESS
+        ;;
+*)		ramdisk_usage
+		exit $OCF_ERR_UNIMPLEMENTED
+		;;
+esac
+rc=$?
+ocf_log debug "${OCF_RESOURCE_INSTANCE} $__OCF_ACTION : $rc"
+exit $rc
+
