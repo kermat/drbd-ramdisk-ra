@@ -251,7 +251,7 @@ ramdisk_monitor() {
 	# Monitor _MUST!_ differentiate correctly between running
 	# (SUCCESS), failed (ERROR) or _cleanly_ stopped (NOT RUNNING).
 	# That is THREE states, not just yes/no.
-    logget "drbdramdisk: ramdisk_monitor"
+    logger "drbdramdisk: ramdisk_monitor"
 
     if list_mounts | grep -q " ${OCF_RESKEY_mountpoint} " >/dev/null 2>&1; then
         rc=$OCF_SUCCESS
