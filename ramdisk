@@ -107,7 +107,7 @@ END
 
 # shamefully copied from Filesystem RA
 list_mounts() {
-    logger "MDK: list_mounts"
+    logger "drbdramdisk: list_mounts"
     local inpf=""
     if [ -e "/proc/mounts" ] ; then
         inpf=/proc/mounts
@@ -132,13 +132,13 @@ END
 }
 
 ramdisk_start() {
-    logger "MDK: ramdisk_start"
+    logger "drbdramdisk: ramdisk_start"
     ramdisk_monitor
     if [ $? =  $OCF_SUCCESS ]; then
 	    return $OCF_SUCCESS
     fi
     
-    logger "MDK: loop_device is set to ${OCF_RESKEY_loop_device}"
+    logger "drbdramdisk: loop_device is set to ${OCF_RESKEY_loop_device}"
     # TODO: Check that we have enough free memory to do this
     $MOUNT -t ${OCF_RESKEY_type} -o size=${OCF_RESKEY_size} tmpfs ${OCF_RESKEY_mountpoint}
     if [ $? =  $OCF_SUCCESS ]; then
@@ -151,7 +151,7 @@ ramdisk_start() {
 }
 
 loop_device_start() {
-    logger "MDK: loop_device_start"
+    logger "drbdramdisk: loop_device_start"
     # TODO: truncate or fallocate are valid; need to check for binaries.
     fallocate -l ${OCF_RESKEY_size} ${OCF_RESKEY_mountpoint}/${OCF_RESKEY_loop_device}
     if [ $? =  $OCF_SUCCESS ]; then
@@ -171,7 +171,7 @@ loop_device_start() {
 }
 
 drbd_resource_start(){
-    logger "MDK: drbd_resource_start"
+    logger "drbdramdisk: drbd_resource_start"
     # TODO: we should check for the binaries.
     # since this is ramdisk, we'll always need fresh meta-data. 
     drbdadm -- --force create-md ${OCF_RESKEY_drbd_resource}
@@ -201,7 +201,7 @@ drbd_resource_start(){
 
 
 ramdisk_stop() {
-    logger "MDK: ramdisk_stop"
+    logger "drbdramdisk: ramdisk_stop"
     if [ -n "${OCF_RESKEY_loop_device}" ]; then
         loop_device_stop
     fi
@@ -218,7 +218,7 @@ ramdisk_stop() {
 }
 
 loop_device_stop() {
-    logger "MDK: loop_device_stop"
+    logger "drbdramdisk: loop_device_stop"
     # is DRBD on top? Stop it first
     if [ -n "${OCF_RESKEY_drbd_resource}" ]; then
         drbd_resource_stop
@@ -236,7 +236,7 @@ loop_device_stop() {
 }
 
 drbd_resource_stop(){
-    logger "MDK: drbd_resource_stop"
+    logger "drbdramdisk: drbd_resource_stop"
     drbdadm down ${OCF_RESKEY_drbd_resource}
     if [ $? =  $OCF_SUCCESS ]; then
         return $OCF_SUCCESS
@@ -251,7 +251,7 @@ ramdisk_monitor() {
 	# Monitor _MUST!_ differentiate correctly between running
 	# (SUCCESS), failed (ERROR) or _cleanly_ stopped (NOT RUNNING).
 	# That is THREE states, not just yes/no.
-    logger "MDK: ramdisk_monitor"
+    logget "drbdramdisk: ramdisk_monitor"
 
     if list_mounts | grep -q " ${OCF_RESKEY_mountpoint} " >/dev/null 2>&1; then
         rc=$OCF_SUCCESS
