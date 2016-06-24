@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # This is a resource agent for managing a ramdisk. Optionally, one
-# can choose to use DRBD9 to replicate that ramdisk.
+# can choose to use DRBD 9 to replicate that ramdisk.
 # 
 #       Original Author:    Matt Kereczman
 
